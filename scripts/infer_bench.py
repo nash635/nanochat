@@ -138,7 +138,7 @@ def main():
     max_rows = int((total_vram - w_bytes) / (kv_store * config.sequence_len))
 
     print("=" * 100)
-    print(f"Model: {args.source} {meta.get('model_tag', '')} (step {meta['step']}) | "
+    print(f"Model: {args.source} {meta.get('model_tag', '')} (step {meta.get('step', '?')}) | "
           f"depth {config.n_layer}, dim {config.n_embd}, heads {config.n_head}, kv heads {config.n_kv_head} (GQA)")
     print(f"GPU: {device_name} | peak bandwidth {peak_bw/1e12:.2f} TB/s | peak compute {peak_flops/1e12:.0f} TFLOPS | VRAM {total_vram/2**30:.0f} GiB")
     print("-" * 100)
@@ -157,7 +157,7 @@ def main():
     # Everything printed above also goes into the final JSON line for scripts
     payload = {
         "source": args.source,
-        "step": meta["step"],
+        "step": meta.get("step"),
         "model_config": meta["model_config"],
         "gpu": device_name,
         # None (not Infinity) for unknown GPUs, so the last line stays valid JSON
