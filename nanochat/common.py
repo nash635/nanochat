@@ -293,6 +293,7 @@ def get_peak_bandwidth(device_name: str) -> float:
         (["b100"], 8.0e12),
         # NVIDIA Hopper
         (["h200"], 4.8e12),
+        (["h20"], 4.0e12),
         (["h100", "nvl"], 3.9e12),
         (["h100", "pcie"], 2.0e12),
         (["h100"], 3.35e12), # SXM
