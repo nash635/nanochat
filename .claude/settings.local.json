@@ -111,7 +111,19 @@
       "Bash(xargs ls -t)",
       "Bash(dmesg)",
       "Bash(sort -t_ -k1 -V)",
-      "Bash(bash runs/run_wp5_infer_chat.sh 2>&1)"
+      "Bash(bash runs/run_wp5_infer_chat.sh 2>&1)",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git git worktree *)",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git GIT_WORK_TREE=/volume/posttrain/users/lqiu/src/nanochat git status *)",
+      "Bash(bash -c 'cd /volume/posttrain/users/lqiu/src/nanochat && git worktree list')",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git GIT_WORK_TREE=/volume/posttrain/users/lqiu/src/nanochat git log *)",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git git log *)",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git GIT_WORK_TREE=/volume/posttrain/users/lqiu/src/nanochat/.claude/worktrees/nanochat-moe-fix git log *)",
+      "Bash(mkdir -p /volume/posttrain/users/lqiu/src/nanochat/.git/worktrees/nanochat-moe-fix/logs/refs/heads)",
+      "Bash(ln -s /volume/posttrain/users/lqiu/src/nanochat/.git/logs/HEAD /volume/posttrain/users/lqiu/src/nanochat/.git/worktrees/nanochat-moe-fix/logs/HEAD)",
+      "Bash(ln -s /volume/posttrain/users/lqiu/src/nanochat/.git/logs/refs/heads /volume/posttrain/users/lqiu/src/nanochat/.git/worktrees/nanochat-moe-fix/logs/refs/heads)",
+      "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git git rev-parse *)",
+      "Bash(git -C /volume/posttrain/users/lqiu/src/nanochat --no-pager diff --stat -- nanochat/moe.py tests/test_moe.py .claude/settings.local.json)",
+      "Bash(echo \"---EXIT $?---\")"
     ]
   }
 }

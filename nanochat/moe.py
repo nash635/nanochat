@@ -17,6 +17,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class Linear(nn.Linear):
+    """nn.Linear that casts weights to match input dtype in forward.
+    Same as nanochat.gpt.Linear, defined locally to avoid circular import."""
+    def forward(self, x):
+        return F.linear(x, self.weight.to(dtype=x.dtype))
+
+
 class MOEManager:
     """
     Tracks, stores, and aggregates auxiliary losses across multiple MoE layers.
@@ -70,8 +77,8 @@ class Router(nn.Module):
 
         # linear projection for (noisy) softmax gating
         # no bias is used, see page 4 eq (4) in https://arxiv.org/abs/1701.06538
-        self.w_g = nn.Linear(config.n_embd, config.n_exp, bias=False)
-        self.w_noise = nn.Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
+        self.w_g = Linear(config.n_embd, config.n_exp, bias=False)
+        self.w_noise = Linear(config.n_embd, config.n_exp, bias=False) if self.use_noisy_top_k else None
 
     def forward(self, x):
         # optionally run the router in full precision to avoid instability during training
@@ -201,23 +208,19 @@ class MLPExperts(nn.Module):
         super().__init__()
         self.n_exp = config.n_exp
         self.n_embd = config.n_embd
-        self.bias = config.bias
 
         # Expert weights: [n_exp, n_embd, 4*n_embd] and [n_exp, 4*n_embd, n_embd]
         self.c_fc = nn.Parameter(torch.empty(config.n_exp, config.n_embd, 4 * config.n_embd))
         self.c_proj = nn.Parameter(torch.empty(config.n_exp, 4 * config.n_embd, config.n_embd))
-        self.fc_bias = nn.Parameter(torch.empty(config.n_exp, 1, 4 * config.n_embd)) if self.bias else None
-        self.proj_bias = nn.Parameter(torch.empty(config.n_exp, 1, config.n_embd)) if self.bias else None
 
     def forward(self, x):
         # x: [n_exp, exp_capacity, n_embd]
-        x = torch.bmm(x, self.c_fc)  # [n_exp, exp_capacity, 4*n_embd]
-        if self.bias:
-            x = x + self.fc_bias
+        # Cast expert weights to input dtype (same as nanochat's Linear class)
+        c_fc = self.c_fc.to(dtype=x.dtype)
+        c_proj = self.c_proj.to(dtype=x.dtype)
+        x = torch.bmm(x, c_fc)  # [n_exp, exp_capacity, 4*n_embd]
         x = F.relu(x).square()  # relu² activation (nanochat style)
-        x = torch.bmm(x, self.c_proj)  # [n_exp, exp_capacity, n_embd]
-        if self.bias:
-            x = x + self.proj_bias
+        x = torch.bmm(x, c_proj)  # [n_exp, exp_capacity, n_embd]
         return x
 
 
@@ -283,6 +286,3 @@ def init_moe_weights(module, config, n_layer):
         for i in range(module.n_exp):
             torch.nn.init.uniform_(module.c_fc.data[i], -s * 0.4, s * 0.4)
             torch.nn.init.zeros_(module.c_proj.data[i])
-        if module.bias:
-            torch.nn.init.zeros_(module.fc_bias)
-            torch.nn.init.zeros_(module.proj_bias)

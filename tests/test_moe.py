@@ -37,7 +37,6 @@ class MockConfig:
     n_embd = 64
     n_exp = 4
     top_k = 2
-    bias = False
     use_aux_loss = True
     use_router_z_loss = True
     use_noisy_top_k = False
@@ -54,7 +53,6 @@ class DenseMockConfig:
     n_embd = 64
     n_exp = 1
     top_k = 1
-    bias = False
     use_aux_loss = False
     use_router_z_loss = False
     use_noisy_top_k = False
@@ -197,18 +195,6 @@ class TestMLPExperts:
         assert out.shape == (n_exp, exp_capacity, config.n_embd), \
             f"Expected {(n_exp, exp_capacity, config.n_embd)}, got {out.shape}"
 
-    def test_expert_with_bias(self):
-        """MLPExperts works with bias enabled."""
-        config = MockConfig()
-        config.bias = True
-        experts = MLPExperts(config)
-        init_moe_weights(experts, config, n_layer=12)
-        n_exp = config.n_exp
-        exp_capacity = 8
-        x = torch.randn(n_exp, exp_capacity, config.n_embd)
-        out = experts(x)
-        assert out.shape == (n_exp, exp_capacity, config.n_embd)
-        assert torch.isfinite(out).all()
 
 
 # ---------------------------------------------------------------------------
@@ -354,17 +340,6 @@ class TestInitWeights:
         assert experts.c_fc.abs().sum().item() > 0, "c_fc should be non-zero after init"
         assert experts.c_proj.abs().sum().item() == 0.0, "c_proj should be zeros after init"
 
-    def test_init_moe_weights_with_bias(self):
-        """init_moe_weights initializes bias parameters when bias=True."""
-        config = MockConfig()
-        config.bias = True
-        experts = MLPExperts(config)
-        init_moe_weights(experts, config, n_layer=12)
-        assert experts.fc_bias is not None
-        assert experts.proj_bias is not None
-        # Biases should be zero
-        assert experts.fc_bias.abs().sum().item() == 0.0
-        assert experts.proj_bias.abs().sum().item() == 0.0
 
 
 # ---------------------------------------------------------------------------
