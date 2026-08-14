@@ -25,6 +25,9 @@ from nanochat.optim import MuonAdamW
 # Our custom Flash Attention module that automatically uses FA3 when compatible and SDPA fallback otherwise
 from nanochat.flash_attention import flash_attn
 
+# MoE support
+from nanochat.moe import MOEManager, MOELayer, init_moe_weights
+
 @dataclass
 class GPTConfig:
     sequence_len: int = 2048
@@ -37,6 +40,21 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+
+    # MoE settings (n_exp=1 means dense, no MoE)
+    n_exp: int = 1
+    top_k: int = 2
+    use_aux_loss: bool = False
+    use_router_z_loss: bool = False
+    use_noisy_top_k: bool = False
+    aux_loss_weight: float = 0.01
+    router_z_loss_weight: float = 0.001
+    train_capacity: float = 1.25
+    eval_capacity: float = 2.0
+    min_capacity: int = 4
+    stride: int = 2
+    use_switch_tfm_init: bool = False
+    router_use_full_prec: bool = False
 
 
 def norm(x):
@@ -142,10 +160,13 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config, layer_idx):
+    def __init__(self, config, layer_idx, use_moe=False, moe_manager=None):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
-        self.mlp = MLP(config)
+        if use_moe:
+            self.mlp = MOELayer(config, moe_manager)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
         x = x + self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
@@ -170,9 +191,15 @@ class GPT(nn.Module):
         padded_vocab_size = ((config.vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
         if padded_vocab_size != config.vocab_size:
             print0(f"Padding vocab_size from {config.vocab_size} to {padded_vocab_size} for efficiency")
+        # MoE: create a manager to track aux_loss and router_z_loss across layers
+        self.moe_manager = MOEManager() if config.n_exp > 1 else None
+
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab_size, config.n_embd),
-            "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
+            "h": nn.ModuleList([
+                Block(config, layer_idx, use_moe=(config.n_exp > 1 and layer_idx % config.stride == 0), moe_manager=self.moe_manager)
+                for layer_idx in range(config.n_layer)
+            ]),
         })
         self.lm_head = Linear(config.n_embd, padded_vocab_size, bias=False)
         # Per-layer learnable scalars (inspired by modded-nanogpt)
@@ -228,8 +255,11 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
-            torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
-            torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            if isinstance(block.mlp, MLP):
+                torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
+                torch.nn.init.zeros_(block.mlp.c_proj.weight)
+            elif isinstance(block.mlp, MOELayer):
+                init_moe_weights(block.mlp.experts, self.config, self.config.n_layer)
 
         # Per-layer scalars
         # Per-layer resid init: stronger residual at early layers, weaker at deep layers
@@ -421,13 +451,17 @@ class GPT(nn.Module):
 
         # Separate out all parameters into groups
         matrix_params = list(self.transformer.h.parameters())
+        # MoE expert params are 3D (n_exp, n_embd, 4*n_embd) — Muon only supports 2D,
+        # so route them to AdamW instead.
+        moe_expert_params = [p for p in matrix_params if p.dim() >= 3]
+        matrix_params = [p for p in matrix_params if p.dim() < 3]
         value_embeds_params = list(self.value_embeds.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
         resid_params = [self.resid_lambdas]
         x0_params = [self.x0_lambdas]
         smear_params = [self.smear_gate.weight, self.smear_lambda, self.backout_lambda]
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(value_embeds_params) + len(resid_params) + len(x0_params) + len(smear_params) + len(moe_expert_params)
 
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (tuned for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
@@ -442,6 +476,8 @@ class GPT(nn.Module):
             dict(kind='adamw', params=resid_params, lr=scalar_lr * 0.01, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.05),
             dict(kind='adamw', params=x0_params, lr=scalar_lr, betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),  # higher beta1 for x0
             dict(kind='adamw', params=smear_params, lr=0.2, betas=(0.8, 0.95), eps=1e-10, weight_decay=0.0),
+            # MoE expert params (3D) — AdamW only, Muon doesn't support 3D
+            dict(kind='adamw', params=moe_expert_params, lr=matrix_lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=weight_decay),
         ]
         # Muon groups (matrix params, grouped by shape for stacking)
         for shape in sorted({p.shape for p in matrix_params}):
@@ -518,6 +554,13 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            # Add MoE auxiliary losses
+            if self.moe_manager is not None:
+                if self.config.use_aux_loss:
+                    loss = loss + self.config.aux_loss_weight * self.moe_manager.aggregate_aux_loss()
+                if self.config.use_router_z_loss:
+                    loss = loss + self.config.router_z_loss_weight * self.moe_manager.aggregate_router_z_loss()
+                self.moe_manager.reset()
             return loss
         else:
             # inference: just return the logits directly
