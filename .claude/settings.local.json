@@ -123,7 +123,14 @@
       "Bash(ln -s /volume/posttrain/users/lqiu/src/nanochat/.git/logs/refs/heads /volume/posttrain/users/lqiu/src/nanochat/.git/worktrees/nanochat-moe-fix/logs/refs/heads)",
       "Bash(GIT_DIR=/volume/posttrain/users/lqiu/src/nanochat/.git git rev-parse *)",
       "Bash(git -C /volume/posttrain/users/lqiu/src/nanochat --no-pager diff --stat -- nanochat/moe.py tests/test_moe.py .claude/settings.local.json)",
-      "Bash(echo \"---EXIT $?---\")"
+      "Bash(echo \"---EXIT $?---\")",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /volume/posttrain/users/lqiu/src/nanochat/.venv/bin/python *)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest /volume/posttrain/users/lqiu/src/nanochat/tests/test_moe.py -q)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest /volume/posttrain/users/lqiu/src/nanochat/tests/ -q)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest /volume/posttrain/users/lqiu/src/nanochat/tests/test_moe.py /volume/posttrain/users/lqiu/src/nanochat/tests/test_optim.py -q)",
+      "Bash(/opt/venv/bin/python /root/.claude/jobs/56bd19d6/tmp/phase1_smoke.py)",
+      "Bash(bash -n runs/run_moe_base_pretrain.sh)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest tests/test_moe.py -q)"
     ]
   }
 }

@@ -25,6 +25,27 @@ def _patch_missing_config_keys(model_config_kwargs):
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
+    # MoE config keys predate the MoE feature. Old dense checkpoints load as dense
+    # (n_exp=1), so all defaults below match GPTConfig's dataclass defaults.
+    moe_defaults = {
+        "n_exp": 1,
+        "top_k": 2,
+        "use_aux_loss": False,
+        "use_router_z_loss": False,
+        "use_noisy_top_k": False,
+        "aux_loss_weight": 0.01,
+        "router_z_loss_weight": 0.001,
+        "train_capacity": 1.25,
+        "eval_capacity": 2.0,
+        "min_capacity": 4,
+        "stride": 2,
+        "use_switch_tfm_init": False,
+        "router_use_full_prec": False,
+    }
+    for key, default in moe_defaults.items():
+        if key not in model_config_kwargs:
+            model_config_kwargs[key] = default
+            log0(f"Patching missing {key} in model config to {default}")
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
@@ -37,6 +58,28 @@ def _patch_missing_keys(model_data, model_config):
     if "x0_lambdas" not in model_data:
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
+    # MoE expert params: loading a dense checkpoint into a MoE model (n_exp > 1)
+    # leaves the expert weights missing. Random-init them to match init_moe_weights
+    # (c_fc uniform 0.4x, c_proj zeros) so load_state_dict(strict=True) passes.
+    if model_config.n_exp > 1:
+        n_embd = model_config.n_embd
+        s = 3**0.5 * n_embd**-0.5
+        device = next(iter(model_data.values())).device
+        for i in range(n_layer):
+            if i % model_config.stride != 0:
+                continue
+            c_fc_key = f"transformer.h.{i}.mlp.experts.c_fc"
+            c_proj_key = f"transformer.h.{i}.mlp.experts.c_proj"
+            if c_fc_key not in model_data:
+                c_fc = torch.empty(model_config.n_exp, n_embd, 4 * n_embd, device=device)
+                for e in range(model_config.n_exp):
+                    torch.nn.init.uniform_(c_fc[e], -s * 0.4, s * 0.4)
+                model_data[c_fc_key] = c_fc
+                log0(f"Patching missing {c_fc_key} with random init")
+            if c_proj_key not in model_data:
+                c_proj = torch.zeros(model_config.n_exp, 4 * n_embd, n_embd, device=device)
+                model_data[c_proj_key] = c_proj
+                log0(f"Patching missing {c_proj_key} with zeros")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
     if rank == 0:

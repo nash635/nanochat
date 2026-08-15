@@ -52,6 +52,20 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+# MoE architecture
+parser.add_argument("--n-exp", type=int, default=1, help="number of experts (1 = dense, no MoE)")
+parser.add_argument("--top-k", type=int, default=2, help="number of experts activated per token")
+parser.add_argument("--stride", type=int, default=2, help="insert a MoE layer every `stride` layers")
+parser.add_argument("--use-aux-loss", action="store_true", help="enable Switch Transformer auxiliary load-balancing loss")
+parser.add_argument("--aux-loss-weight", type=float, default=0.01, help="weight for the auxiliary load-balancing loss")
+parser.add_argument("--use-router-z-loss", action="store_true", help="enable ST-MoE router z loss")
+parser.add_argument("--router-z-loss-weight", type=float, default=0.001, help="weight for the router z loss")
+parser.add_argument("--use-noisy-top-k", action="store_true", help="add learned noise to router logits")
+parser.add_argument("--train-capacity", type=float, default=1.25, help="expert capacity factor during training")
+parser.add_argument("--eval-capacity", type=float, default=2.0, help="expert capacity factor during evaluation")
+parser.add_argument("--min-capacity", type=int, default=4, help="minimum expert capacity")
+parser.add_argument("--use-switch-tfm-init", action="store_true", help="use Switch Transformer init for experts")
+parser.add_argument("--router-use-full-prec", action="store_true", help="compute router logits in fp32")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -137,6 +151,13 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
+        n_exp=args.n_exp, top_k=args.top_k, stride=args.stride,
+        use_aux_loss=args.use_aux_loss, aux_loss_weight=args.aux_loss_weight,
+        use_router_z_loss=args.use_router_z_loss, router_z_loss_weight=args.router_z_loss_weight,
+        use_noisy_top_k=args.use_noisy_top_k,
+        train_capacity=args.train_capacity, eval_capacity=args.eval_capacity,
+        min_capacity=args.min_capacity, use_switch_tfm_init=args.use_switch_tfm_init,
+        router_use_full_prec=args.router_use_full_prec,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -177,6 +198,10 @@ if args.fp8:
         # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
         def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
             if not isinstance(mod, nn.Linear):
+                return False
+            # Skip MoE router projections (router runs in fp32) and expert params
+            # (experts use bmm over 3D nn.Parameter, not Linear — defensive here).
+            if "router" in fqn or "experts" in fqn:
                 return False
             if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
                 return False
