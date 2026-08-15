@@ -130,7 +130,24 @@
       "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest /volume/posttrain/users/lqiu/src/nanochat/tests/test_moe.py /volume/posttrain/users/lqiu/src/nanochat/tests/test_optim.py -q)",
       "Bash(/opt/venv/bin/python /root/.claude/jobs/56bd19d6/tmp/phase1_smoke.py)",
       "Bash(bash -n runs/run_moe_base_pretrain.sh)",
-      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest tests/test_moe.py -q)"
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest tests/test_moe.py -q)",
+      "Bash(touch /opt/venv/lib/python3.12/site-packages/.wtest)",
+      "Bash(rm -f /opt/venv/lib/python3.12/site-packages/.wtest)",
+      "Bash(rm -rf /tmp/nanochat_smoke)",
+      "Bash(mkdir -p /tmp/nanochat_smoke)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/tokenizer /tmp/nanochat_smoke/tokenizer)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/base_data_climbmix /tmp/nanochat_smoke/base_data_climbmix)",
+      "Bash(NANOCHAT_BASE_DIR=/tmp/nanochat_smoke /opt/venv/bin/python -c \"from nanochat.tokenizer import get_tokenizer; t=get_tokenizer\\(\\); print\\('tokenizer OK, vocab', t.get_vocab_size\\(\\)\\)\")",
+      "Bash(NANOCHAT_BASE_DIR=/tmp/nanochat_smoke NANOCHAT_DATASET_URL=https://hf-mirror.com /opt/venv/bin/python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 --total-batch-size=512 --num-iterations=3 --eval-every=-1 --core-metric-every=-1 --sample-every=-1 --n-exp=4 --top-k=2 --stride=1 --use-aux-loss --use-router-z-loss --fp8 --run=dummy)",
+      "Bash(rm -rf /tmp/nanochat_smoke_d24)",
+      "Bash(mkdir -p /tmp/nanochat_smoke_d24)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/tokenizer /tmp/nanochat_smoke_d24/tokenizer)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/base_data_climbmix /tmp/nanochat_smoke_d24/base_data_climbmix)",
+      "Bash(NANOCHAT_BASE_DIR=/tmp/nanochat_smoke_d24 NANOCHAT_DATASET_URL=https://hf-mirror.com /opt/venv/bin/python *)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/tokenizer /tmp/nanochat_smoke_eval/tokenizer)",
+      "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/base_data_climbmix /tmp/nanochat_smoke_eval/base_data_climbmix)",
+      "Bash(NANOCHAT_BASE_DIR=/tmp/nanochat_smoke_eval NANOCHAT_DATASET_URL=https://hf-mirror.com /opt/venv/bin/python *)",
+      "Bash(/opt/venv/bin/pip index *)"
     ]
   }
 }
