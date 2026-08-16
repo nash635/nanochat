@@ -69,39 +69,38 @@ class DenseMockConfig:
 # ---------------------------------------------------------------------------
 class TestRouter:
     def test_router_output_shapes(self):
-        """Router returns (used_capacity, cb_weight, sec_mask) with correct shapes."""
+        """Router returns sparse (top_k_indices, router_probs, exp_rank, exp_capacity)."""
         config = MockConfig()
         router = Router(config)
         B, T = 2, 8
         x = torch.randn(B, T, config.n_embd)
-        used_cap, cb_weight, sec_mask = router(x)
+        top_k_indices, router_probs, exp_rank, exp_capacity = router(x)
 
         num_tokens = B * T
-        exp_capacity = router.get_capacity(num_tokens)
-
-        assert used_cap.shape == (config.n_exp,), f"used_capacity shape: {used_cap.shape}"
-        assert cb_weight.shape == (num_tokens, config.n_exp, exp_capacity), \
-            f"cb_weight shape: {cb_weight.shape}"
-        assert sec_mask.shape == (num_tokens, config.n_exp, exp_capacity), \
-            f"sec_mask shape: {sec_mask.shape}"
+        assert top_k_indices.shape == (num_tokens, config.top_k), \
+            f"top_k_indices shape: {top_k_indices.shape}"
+        assert router_probs.shape == (num_tokens, config.top_k), \
+            f"router_probs shape: {router_probs.shape}"
+        assert exp_rank.shape == (num_tokens, config.top_k), \
+            f"exp_rank shape: {exp_rank.shape}"
+        assert exp_capacity == router.get_capacity(num_tokens)
+        # probabilities are top-k softmax, so they sum to 1 per token
+        assert torch.allclose(router_probs.sum(dim=1), torch.ones(num_tokens), atol=1e-6)
 
     def test_router_topk_indices(self):
-        """Router selects exactly top_k experts per token."""
+        """Router selects exactly top_k distinct experts per token."""
         config = MockConfig()
         router = Router(config)
         B, T = 1, 4
         x = torch.randn(B, T, config.n_embd)
-        used_cap, cb_weight, sec_mask = router(x)
+        top_k_indices, router_probs, exp_rank, exp_capacity = router(x)
 
-        # Count how many experts are selected per token
         num_tokens = B * T
-        # sec_mask is [num_tokens, n_exp, exp_capacity] bool
-        # Sum over capacity dim to get [num_tokens, n_exp]
-        selected_per_token = sec_mask.view(num_tokens, config.n_exp, -1).sum(dim=-1)
-        # Each token should select exactly top_k experts
+        assert top_k_indices.shape == (num_tokens, config.top_k)
+        # each token's chosen experts are distinct
         for i in range(num_tokens):
-            assert selected_per_token[i].sum().item() == config.top_k, \
-                f"Token {i} selected {selected_per_token[i].sum().item()} experts, expected {config.top_k}"
+            assert len(set(top_k_indices[i].tolist())) == config.top_k, \
+                f"Token {i} did not select {config.top_k} distinct experts: {top_k_indices[i]}"
 
     def test_aux_loss_is_scalar(self):
         """Aux loss is a scalar tensor."""
@@ -142,19 +141,27 @@ class TestRouter:
         assert router._pending_z_loss is None
 
     def test_capacity_clipping(self):
-        """Expert capacity limits the number of tokens per expert."""
+        """Tokens are dropped when an expert exceeds its capacity."""
         config = MockConfig()
-        config.min_capacity = 4  # small capacity for testing
+        config.n_exp = 4
+        config.top_k = 1
+        config.min_capacity = 2
         router = Router(config)
         router.train()  # use train_capacity
-        B, T = 4, 16  # 64 tokens
-        x = torch.randn(B, T, config.n_embd)
-        used_cap, cb_weight, sec_mask = router(x)
+        # force every token to route to expert 0 so it overflows its capacity
+        with torch.no_grad():
+            router.w_g.weight.zero_()
+            router.w_g.weight[0, :] = 10.0
+        B, T = 1, 8  # 8 tokens, top_k=1 -> capacity = floor(1*1.25*8/4) = 2
+        x = torch.ones(B, T, config.n_embd)  # all-positive -> expert 0 always wins
+        top_k_indices, router_probs, exp_rank, exp_capacity = router(x)
 
-        exp_capacity = router.get_capacity(B * T)
-        # used_capacity should not exceed exp_capacity
-        assert (used_cap <= exp_capacity).all(), \
-            f"used_capacity exceeds exp_capacity: {used_cap} > {exp_capacity}"
+        assert exp_capacity == 2
+        assert (top_k_indices == 0).all(), "all tokens should route to expert 0"
+        valid = exp_rank < exp_capacity
+        # exactly `capacity` tokens are kept, the rest are dropped
+        assert valid.sum().item() == exp_capacity, \
+            f"expected {exp_capacity} kept tokens, got {valid.sum().item()}"
 
     def test_noisy_top_k(self):
         """Noisy top-k router produces valid output."""
@@ -163,9 +170,9 @@ class TestRouter:
         router = Router(config)
         B, T = 2, 8
         x = torch.randn(B, T, config.n_embd)
-        used_cap, cb_weight, sec_mask = router(x)
-        assert used_cap.shape == (config.n_exp,)
-        assert cb_weight.shape[0] == B * T
+        top_k_indices, router_probs, exp_rank, exp_capacity = router(x)
+        assert top_k_indices.shape == (B * T, config.top_k)
+        assert exp_capacity == router.get_capacity(B * T)
 
     def test_router_deterministic(self):
         """Same input produces same output (no noise)."""
@@ -175,8 +182,9 @@ class TestRouter:
         x = torch.randn(2, 8, config.n_embd)
         out1 = router(x)
         out2 = router(x)
-        for a, b in zip(out1, out2):
+        for a, b in zip(out1[:3], out2[:3]):  # first three are tensors
             torch.testing.assert_close(a, b)
+        assert out1[3] == out2[3]  # capacity is an int, deterministic too
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +255,51 @@ class TestMOELayer:
         out = moe(x)
         assert torch.isfinite(out).all(), "MOELayer output contains non-finite values"
 
+    def test_sparse_dispatch_matches_dense_reference(self):
+        """Sparse dispatch/combine matches a brute-force per-token reference."""
+        config = MockConfig()
+        manager = MOEManager()
+        moe = MOELayer(config, manager)
+        init_moe_weights(moe.experts, config, n_layer=12)
+        moe.eval()  # eval_capacity=2.0 -> capacity == num_tokens -> no dropping
+        B, T = 2, 8
+        num_tokens = B * T
+        x = torch.randn(B, T, config.n_embd)
+
+        out = moe(x)  # sparse implementation
+
+        # brute-force reference: loop over tokens and their top-k experts
+        xf = x.view(num_tokens, config.n_embd)
+        with torch.no_grad():
+            logits = moe.router.w_g(xf)  # [num_tokens, n_exp]
+            topk_logits, topk_idx = logits.topk(config.top_k, dim=-1)
+            probs = F.softmax(topk_logits, dim=-1)  # [num_tokens, top_k]
+            ref = torch.zeros(num_tokens, config.n_embd)
+            for t in range(num_tokens):
+                for kk in range(config.top_k):
+                    e = topk_idx[t, kk].item()
+                    w = probs[t, kk].item()
+                    h = xf[t] @ moe.experts.c_fc[e]  # [4*n_embd]
+                    h = F.relu(h).square()
+                    y = h @ moe.experts.c_proj[e]  # [n_embd]
+                    ref[t] += w * y
+        ref = ref.view(B, T, config.n_embd)
+
+        torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+
+    def test_moe_layer_preserves_dtype(self):
+        """MOELayer output stays in the activation dtype (regression: dense was fp32)."""
+        config = MockConfig()
+        manager = MOEManager()
+        moe = MOELayer(config, manager)
+        init_moe_weights(moe.experts, config, n_layer=12)
+        x = torch.randn(2, 8, config.n_embd, dtype=torch.bfloat16)
+        try:
+            out = moe(x)
+        except RuntimeError as e:
+            pytest.skip(f"bf16 bmm not supported on this CPU: {e}")
+        assert out.dtype == x.dtype
+
 
 # ---------------------------------------------------------------------------
 # MOEManager tests
@@ -295,10 +348,11 @@ class TestDenseCompatibility:
         router = Router(config)
         B, T = 2, 8
         x = torch.randn(B, T, config.n_embd)
-        used_cap, cb_weight, sec_mask = router(x)
+        top_k_indices, router_probs, exp_rank, exp_capacity = router(x)
         # With n_exp=1 and top_k=1, all tokens go to the single expert
-        assert used_cap.shape == (1,)
-        assert sec_mask.shape[0] == B * T
+        assert top_k_indices.shape == (B * T, 1)
+        assert (top_k_indices == 0).all()
+        assert exp_capacity == router.get_capacity(B * T)
 
     def test_n_exp_1_moe_layer(self):
         """With n_exp=1, MOELayer produces valid output of correct shape."""

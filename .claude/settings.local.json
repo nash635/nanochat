@@ -147,7 +147,12 @@
       "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/tokenizer /tmp/nanochat_smoke_eval/tokenizer)",
       "Bash(ln -sf /volume/posttrain/users/lqiu/src/nanochat/cache/base_data_climbmix /tmp/nanochat_smoke_eval/base_data_climbmix)",
       "Bash(NANOCHAT_BASE_DIR=/tmp/nanochat_smoke_eval NANOCHAT_DATASET_URL=https://hf-mirror.com /opt/venv/bin/python *)",
-      "Bash(/opt/venv/bin/pip index *)"
+      "Bash(/opt/venv/bin/pip index *)",
+      "Bash(nohup bash runs/run_moe_base_pretrain.sh)",
+      "Bash(echo \"launched pid=$!\")",
+      "Bash(kill 480371 480373 480616 480660 480661 480662 480663 480664 480665 480666 480667)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest tests/test_moe.py::TestRouter::test_capacity_clipping -q)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python /tmp/test_sparse_compile.py)"
     ]
   }
 }
