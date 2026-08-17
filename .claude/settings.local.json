@@ -152,7 +152,32 @@
       "Bash(echo \"launched pid=$!\")",
       "Bash(kill 480371 480373 480616 480660 480661 480662 480663 480664 480665 480666 480667)",
       "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python -m pytest tests/test_moe.py::TestRouter::test_capacity_clipping -q)",
-      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python /tmp/test_sparse_compile.py)"
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python /tmp/test_sparse_compile.py)",
+      "Bash(dmesg -T)",
+      "Bash(echo \"---exit:$?---\")",
+      "Bash(grep -iA5 \"ecc errors\")",
+      "Bash(grep -nA25 \"def estimate_flops\" nanochat/gpt.py)",
+      "Bash(grep -nA10 \"def get_scaling_params\" scripts/base_train.py)",
+      "Bash(grep -nA 40 \"def setup_optimizer\" nanochat/gpt.py)",
+      "Bash(grep -nE \"^import torch.distributed|^import torch$|import torch.distributed|as dist|from torch import\" scripts/base_train.py)",
+      "Bash(grep -nA 45 \"class GPTConfig\" nanochat/gpt.py)",
+      "Bash(grep -nA3 \"def forward\\\\\\(self, idx\" nanochat/gpt.py)",
+      "Bash(PYTHONPATH=. python /tmp/test_moe_fwd.py)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(kill -TERM 898064)",
+      "Bash(pkill -TERM -f \"scripts.base_train\")",
+      "Bash(bash -n runs/run_moe_base_pretrain_nofp8.sh)",
+      "Bash(rm -rf /tmp/nanochat_smoke/logs)",
+      "Bash(mkdir -p /tmp/nanochat_smoke/logs)",
+      "Bash(bash -n /tmp/run_moe_verify_nofp8.sh)",
+      "Bash(nohup bash /tmp/run_moe_verify_nofp8.sh)",
+      "Bash(echo \"已后台启动, PID=$!\")",
+      "Bash(pkill -TERM -f \"run_moe_verify_nofp8\")",
+      "Bash(echo \"launched pid $!\")",
+      "Bash(kill -9 1991057)",
+      "Bash(awk '{print $2, $3\"%CPU\", $11, $12, $13, $14}')",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python /tmp/traj_gelu_150.py)",
+      "Bash(PYTHONPATH=/volume/posttrain/users/lqiu/src/nanochat /opt/venv/bin/python /tmp/traj_relu2_150.py)"
     ]
   }
 }

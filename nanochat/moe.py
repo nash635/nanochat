@@ -3,7 +3,9 @@ MoE (Mixture of Experts) module for nanochat.
 
 Ports the Router, MLPExperts, and MOELayer from nanoMoE, adapted to:
 - nanochat's Linear class (casts weights to input dtype in forward)
-- nanochat's relu² activation (F.relu(x).square())
+- nanoMoE's GELU activation (F.gelu(x)) — relu² was replaced because under the
+  AdamW expert optimizer it grows unboundedly, unlike nanochat's dense MLP whose
+  relu² is stabilized by the Muon spectral-norm bound.
 - nanochat's GPTConfig dataclass
 
 The MOELayer replaces the standard MLP in every `stride`-th block,
@@ -33,10 +35,18 @@ class MOEManager:
     def __init__(self):
         self.aux_loss = []
         self.router_z_loss = []
+        self.expert_loads = []
+        # Cached aggregates from the last forward pass, so the training loop can
+        # log router diagnostics (aux/z loss magnitude and per-expert load) after
+        # `reset()` has already cleared the per-layer lists.
+        self.last_aux_loss = None
+        self.last_router_z_loss = None
+        self.last_expert_load = None
 
     def reset(self):
         self.aux_loss = []
         self.router_z_loss = []
+        self.expert_loads = []
 
     def add_aux_loss(self, loss):
         self.aux_loss.append(loss)
@@ -44,11 +54,24 @@ class MOEManager:
     def add_router_z_loss(self, loss):
         self.router_z_loss.append(loss)
 
+    def add_expert_load(self, load):
+        self.expert_loads.append(load)
+
     def aggregate_aux_loss(self):
-        return sum(self.aux_loss)
+        self.last_aux_loss = sum(self.aux_loss)
+        return self.last_aux_loss
 
     def aggregate_router_z_loss(self):
-        return sum(self.router_z_loss)
+        self.last_router_z_loss = sum(self.router_z_loss)
+        return self.last_router_z_loss
+
+    def aggregate_expert_load(self):
+        """Sum per-layer expert token counts into a single [n_exp] tensor (for logging)."""
+        if not self.expert_loads:
+            self.last_expert_load = None
+            return None
+        self.last_expert_load = torch.stack(self.expert_loads).sum(dim=0)
+        return self.last_expert_load
 
 
 class Router(nn.Module):
@@ -114,6 +137,14 @@ class Router(nn.Module):
             # find top k experts for each token
             top_k_logits, top_k_indices = logits.topk(self.top_k, dim=-1)  # [B, T, k]
             top_k_indices = top_k_indices.view(num_tokens, self.top_k)  # [num_tokens, k]
+
+            # record per-expert token load for diagnostics (no grad, training only).
+            # counts every (token, choice) pair, i.e. each expert's routed-token count
+            # before capacity dropping — the primary signal for expert collapse.
+            self._pending_expert_load = (
+                torch.bincount(top_k_indices.view(-1), minlength=self.n_exp).float()
+                if self.training else None
+            )
 
             # normalize expert probabilities over top-k. Softmax over just the top-k
             # logits equals softmax over the full vector with -inf on the rest (those
@@ -204,16 +235,17 @@ class MLPExperts(nn.Module):
     """
     Batched MLP experts using bmm for efficiency.
 
-    Each expert is a standard MLP: Linear(n_embd, 4*n_embd) -> relu² -> Linear(4*n_embd, n_embd).
+    Each expert is a standard MLP: Linear(n_embd, 4*n_embd) -> GELU -> Linear(4*n_embd, n_embd).
     All experts share the same architecture but have independent weights.
     Parameters are stored as 3D tensors: [n_exp, n_embd, 4*n_embd] and [n_exp, 4*n_embd, n_embd].
 
-    Adapted from nanoMoE MLPExperts to use nanochat's Linear class and relu² activation.
+    Adapted from nanoMoE MLPExperts to use nanochat's Linear class and GELU activation.
     """
 
     def __init__(self, config):
         super().__init__()
         self.n_exp = config.n_exp
+        self.top_k = config.top_k
         self.n_embd = config.n_embd
 
         # Expert weights: [n_exp, n_embd, 4*n_embd] and [n_exp, 4*n_embd, n_embd]
@@ -226,7 +258,7 @@ class MLPExperts(nn.Module):
         c_fc = self.c_fc.to(dtype=x.dtype)
         c_proj = self.c_proj.to(dtype=x.dtype)
         x = torch.bmm(x, c_fc)  # [n_exp, exp_capacity, 4*n_embd]
-        x = F.relu(x).square()  # relu² activation (nanochat style)
+        x = F.gelu(x)  # GELU activation (nanoMoE reference; bounded, unlike relu²)
         x = torch.bmm(x, c_proj)  # [n_exp, exp_capacity, n_embd]
         return x
 
@@ -263,6 +295,8 @@ class MOELayer(nn.Module):
             self.moe_manager.add_aux_loss(self.router._pending_aux_loss)
         if self.router._pending_z_loss is not None:
             self.moe_manager.add_router_z_loss(self.router._pending_z_loss)
+        if self.router._pending_expert_load is not None:
+            self.moe_manager.add_expert_load(self.router._pending_expert_load)
 
         # flatten out the input
         x = x.view(num_tokens, n_embd)  # [num_tokens, n_embd]
@@ -301,10 +335,16 @@ class MOELayer(nn.Module):
 
 def init_moe_weights(module, config, n_layer):
     """
-    Initialize MoE expert weights. Called from GPT.init_weights().
-    Uses the same initialization scheme as nanochat's MLP:
-    - c_fc: uniform with bound = sqrt(3) * std, std = 0.4 * 1/sqrt(n_embd)
-    - c_proj: zeros
+    Initialize MoE expert and router weights. Called from GPT.init_weights().
+    - MLPExperts: same initialization scheme as nanochat's MLP:
+        c_fc: uniform with bound = sqrt(3) * std, std = 0.4 * 1/sqrt(n_embd)
+        c_proj: zeros
+    - Router: Switch Transformer-style gate init (matching nanoMoE):
+        w_g: trunc_normal, std = sqrt(scale / fan_in), scale = 1.0, fan_in = n_embd.
+        Small std => initial logits are small => softmax is roughly uniform across
+        experts, so routing starts balanced instead of collapsing to experts 0/1.
+        w_noise: zeros (noise is added as softplus(w_noise(x)) * randn, so zero
+        weight means no noise at init).
     """
     n_embd = config.n_embd
     s = 3**0.5 * n_embd**-0.5  # sqrt(3) multiplier
@@ -314,3 +354,11 @@ def init_moe_weights(module, config, n_layer):
         for i in range(module.n_exp):
             torch.nn.init.uniform_(module.c_fc.data[i], -s * 0.4, s * 0.4)
             torch.nn.init.zeros_(module.c_proj.data[i])
+    elif isinstance(module, Router):
+        # Router gate: Switch Transformer init (page 10 of https://arxiv.org/abs/2101.03961).
+        # Without this the gate is left as to_empty garbage (zeros), so topk always
+        # returns the lowest expert indices and routing collapses from step 0.
+        w_std = (1.0 / n_embd) ** 0.5  # sqrt(scale / fan_in), scale = 1.0
+        torch.nn.init.trunc_normal_(module.w_g.weight, mean=0.0, std=w_std, a=-2 * w_std, b=2 * w_std)
+        if module.w_noise is not None:
+            torch.nn.init.zeros_(module.w_noise.weight)

@@ -140,6 +140,28 @@ class TestRouter:
         router(x)
         assert router._pending_z_loss is None
 
+    def test_expert_load_recorded(self):
+        """Router records per-expert routed-token load during training."""
+        config = MockConfig()
+        router = Router(config)
+        router.train()
+        B, T = 2, 8
+        x = torch.randn(B, T, config.n_embd)
+        router(x)
+        assert router._pending_expert_load is not None
+        assert router._pending_expert_load.shape == (config.n_exp,)
+        # every (token, choice) pair is counted once
+        assert router._pending_expert_load.sum().item() == B * T * config.top_k
+
+    def test_expert_load_none_in_eval(self):
+        """Router does not record expert load in eval mode."""
+        config = MockConfig()
+        router = Router(config)
+        router.eval()
+        x = torch.randn(2, 8, config.n_embd)
+        router(x)
+        assert router._pending_expert_load is None
+
     def test_capacity_clipping(self):
         """Tokens are dropped when an expert exceeds its capacity."""
         config = MockConfig()
@@ -232,6 +254,19 @@ class TestMOELayer:
         assert len(manager.aux_loss) == 1
         assert len(manager.router_z_loss) == 1
 
+    def test_moe_layer_expert_load_aggregation(self):
+        """MOELayer adds per-expert load to the manager during training."""
+        config = MockConfig()
+        manager = MOEManager()
+        moe = MOELayer(config, manager)
+        init_moe_weights(moe.experts, config, n_layer=12)
+        moe.train()
+        B, T = 2, 8
+        x = torch.randn(B, T, config.n_embd)
+        moe(x)
+        assert len(manager.expert_loads) == 1
+        assert manager.expert_loads[0].shape == (config.n_exp,)
+
     def test_moe_layer_no_aux_loss_when_disabled(self):
         """MOELayer doesn't add losses when disabled."""
         config = MockConfig()
@@ -280,7 +315,7 @@ class TestMOELayer:
                     e = topk_idx[t, kk].item()
                     w = probs[t, kk].item()
                     h = xf[t] @ moe.experts.c_fc[e]  # [4*n_embd]
-                    h = F.relu(h).square()
+                    h = F.gelu(h)
                     y = h @ moe.experts.c_proj[e]  # [n_embd]
                     ref[t] += w * y
         ref = ref.view(B, T, config.n_embd)
@@ -336,6 +371,35 @@ class TestMOEManager:
         manager = MOEManager()
         assert manager.aggregate_aux_loss() == 0.0
         assert manager.aggregate_router_z_loss() == 0.0
+
+    def test_aggregate_expert_load(self):
+        """MOEManager aggregates per-layer expert loads into a single [n_exp] tensor."""
+        manager = MOEManager()
+        manager.add_expert_load(torch.tensor([1.0, 2.0, 3.0, 4.0]))
+        manager.add_expert_load(torch.tensor([4.0, 3.0, 2.0, 1.0]))
+        total = manager.aggregate_expert_load()
+        assert total.shape == (4,)
+        assert torch.allclose(total, torch.tensor([5.0, 5.0, 5.0, 5.0]))
+        assert manager.last_expert_load is not None
+
+    def test_aggregate_expert_load_empty(self):
+        """Aggregating empty expert-load list returns None and caches None."""
+        manager = MOEManager()
+        assert manager.aggregate_expert_load() is None
+        assert manager.last_expert_load is None
+
+    def test_aggregate_caches_last_values(self):
+        """aggregate_* cache the last value so the training loop can read after reset()."""
+        manager = MOEManager()
+        manager.add_aux_loss(torch.tensor(0.1))
+        manager.add_router_z_loss(torch.tensor(0.01))
+        manager.aggregate_aux_loss()
+        manager.aggregate_router_z_loss()
+        manager.reset()
+        # lists are cleared but last_* cache persists for logging
+        assert len(manager.aux_loss) == 0
+        assert abs(manager.last_aux_loss.item() - 0.1) < 1e-6
+        assert abs(manager.last_router_z_loss.item() - 0.01) < 1e-6
 
 
 # ---------------------------------------------------------------------------

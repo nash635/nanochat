@@ -26,7 +26,7 @@ from nanochat.optim import MuonAdamW
 from nanochat.flash_attention import flash_attn
 
 # MoE support
-from nanochat.moe import MOEManager, MOELayer, init_moe_weights
+from nanochat.moe import MOEManager, MOELayer, MLPExperts, Router, init_moe_weights
 
 @dataclass
 class GPTConfig:
@@ -260,6 +260,7 @@ class GPT(nn.Module):
                 torch.nn.init.zeros_(block.mlp.c_proj.weight)
             elif isinstance(block.mlp, MOELayer):
                 init_moe_weights(block.mlp.experts, self.config, self.config.n_layer)
+                init_moe_weights(block.mlp.router, self.config, self.config.n_layer)
 
         # Per-layer scalars
         # Per-layer resid init: stronger residual at early layers, weaker at deep layers
@@ -372,10 +373,25 @@ class GPT(nn.Module):
         """
         The number of parameters that participate in matmuls with the token stream,
         i.e. contribute 2 FLOPs/param to the forward pass. Counted structurally: every
-        matmul in this model goes through the Linear class, while non-matmul params
+        dense matmul goes through the Linear class, while non-matmul params
         (embeddings = lookups, per-layer scalars) are nn.Embedding or raw Parameters.
+        MoE experts are sparse (each token routes to top_k of n_exp experts), so only
+        the active fraction of expert params is counted; the router gate is dense and
+        applied to every token.
         """
         matmul_params = sum(m.weight.numel() for m in self.modules() if isinstance(m, Linear))
+        # MoE experts: sparse dispatch, each token only activates top_k of n_exp experts.
+        for m in self.modules():
+            if isinstance(m, MLPExperts):
+                per_expert = m.c_fc.shape[1] * m.c_fc.shape[2] + m.c_proj.shape[1] * m.c_proj.shape[2]
+                matmul_params += m.top_k * per_expert
+        # Router gate: a dense Linear defined in nanochat.moe (its own Linear class, not
+        # the one counted above), applied to every token.
+        for m in self.modules():
+            if isinstance(m, Router):
+                matmul_params += m.w_g.weight.numel()
+                if m.w_noise is not None:
+                    matmul_params += m.w_noise.weight.numel()
         return matmul_params
 
     def estimate_decode_flops(self, context_len):
@@ -556,10 +572,15 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             # Add MoE auxiliary losses
             if self.moe_manager is not None:
+                # aggregate (and cache for diagnostics) unconditionally, so the training
+                # loop can log aux/z loss and per-expert load even after reset() clears lists
+                aux = self.moe_manager.aggregate_aux_loss()
+                z = self.moe_manager.aggregate_router_z_loss()
+                self.moe_manager.aggregate_expert_load()
                 if self.config.use_aux_loss:
-                    loss = loss + self.config.aux_loss_weight * self.moe_manager.aggregate_aux_loss()
+                    loss = loss + self.config.aux_loss_weight * aux
                 if self.config.use_router_z_loss:
-                    loss = loss + self.config.router_z_loss_weight * self.moe_manager.aggregate_router_z_loss()
+                    loss = loss + self.config.router_z_loss_weight * z
                 self.moe_manager.reset()
             return loss
         else:

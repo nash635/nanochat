@@ -66,6 +66,7 @@ parser.add_argument("--eval-capacity", type=float, default=2.0, help="expert cap
 parser.add_argument("--min-capacity", type=int, default=4, help="minimum expert capacity")
 parser.add_argument("--use-switch-tfm-init", action="store_true", help="use Switch Transformer init for experts")
 parser.add_argument("--router-use-full-prec", action="store_true", help="compute router logits in fp32")
+parser.add_argument("--grad-clip", type=float, default=1.0, help="global gradient norm clipping (0 = disabled); ZeRO-2 aware, all-reduces the global norm across ranks before clipping")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -410,6 +411,32 @@ def get_muon_momentum(it):
 def get_weight_decay(it):
     return weight_decay_scaled * 0.5 * (1 + math.cos(math.pi * it / num_iterations))
 
+def clip_grad_norm_(optimizer, max_norm, device):
+    """ZeRO-2 aware global gradient-norm clipping. Returns the global grad norm.
+
+    nanochat does not use DDP: before optimizer.step() each rank still holds the full,
+    un-synchronized gradient (the optimizer all-reduces / reduce-scatters it internally).
+    To clip the *global* norm we therefore sum each rank's squared local norm across
+    ranks first, then scale every rank's grads by the same coefficient so the resulting
+    update stays identical across ranks. When max_norm <= 0 the norm is only measured.
+    """
+    total_norm_sq = torch.zeros((), device=device, dtype=torch.float32)
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            if p.grad is not None:
+                total_norm_sq += p.grad.detach().float().square().sum()
+    if is_ddp_initialized():
+        dist.all_reduce(total_norm_sq, op=dist.ReduceOp.SUM)
+    total_norm = total_norm_sq.sqrt()
+    if max_norm > 0.0:
+        clip_coef = max_norm / (total_norm + 1e-6)
+        if clip_coef < 1.0:
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p.grad is not None:
+                        p.grad.detach().mul_(clip_coef)
+    return total_norm.item()
+
 # -----------------------------------------------------------------------------
 # Training loop
 
@@ -552,6 +579,8 @@ while True:
             group["weight_decay"] = muon_weight_decay
     if scaler is not None:
         scaler.unscale_(optimizer)
+        # clip the (unscaled) gradients and record the global norm for diagnostics
+        grad_norm = clip_grad_norm_(optimizer, args.grad_clip, device)
         # In distributed training, all ranks must agree on whether to skip the step.
         # Each rank may independently encounter inf/nan gradients, so we all-reduce
         # the found_inf flag (MAX = if any rank found inf, all ranks skip).
@@ -561,6 +590,7 @@ while True:
         scaler.step(optimizer)
         scaler.update()
     else:
+        grad_norm = clip_grad_norm_(optimizer, args.grad_clip, device)
         optimizer.step()
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
@@ -589,7 +619,16 @@ while True:
     else:
         eta_str = ""
     epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+    # MoE diagnostics: global grad norm + router aux/z loss (expert load logged every 100 steps)
+    moe_mgr = orig_model.moe_manager if (args.n_exp > 1 and orig_model.moe_manager is not None) else None
+    if moe_mgr is not None:
+        aux_s = f"{moe_mgr.last_aux_loss.item():.4f}" if moe_mgr.last_aux_loss is not None else "-"
+        z_s = f"{moe_mgr.last_router_z_loss.item():.4f}" if moe_mgr.last_router_z_loss is not None else "-"
+        grad_s = f"{grad_norm:.3f}" if grad_norm is not None else "-"
+        moe_str = f" | gnorm: {grad_s} | aux: {aux_s} | z: {z_s}"
+    else:
+        moe_str = ""
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{moe_str}{eta_str}")
     if step % 100 == 0:
         log_data = {
             "step": step,
@@ -602,7 +641,26 @@ while True:
             "train/mfu": mfu,
             "train/epoch": epoch,
         }
+        if moe_mgr is not None:
+            if grad_norm is not None:
+                log_data["train/grad_norm"] = grad_norm
+            if moe_mgr.last_aux_loss is not None:
+                log_data["train/moe_aux_loss"] = moe_mgr.last_aux_loss.item()
+            if moe_mgr.last_router_z_loss is not None:
+                log_data["train/moe_z_loss"] = moe_mgr.last_router_z_loss.item()
+            if moe_mgr.last_expert_load is not None:
+                load = moe_mgr.last_expert_load
+                # per-expert load (routed tokens) + imbalance ratio for collapse detection
+                log_data["train/moe_expert_load_min"] = load.min().item()
+                log_data["train/moe_expert_load_max"] = load.max().item()
+                log_data["train/moe_expert_load_std"] = load.std().item()
+                for e in range(load.numel()):
+                    log_data[f"train/moe_expert_load_{e}"] = load[e].item()
         wandb_run.log(log_data)
+        # print per-expert routed-token load every 100 steps (collapse/overload detection)
+        if moe_mgr is not None and moe_mgr.last_expert_load is not None:
+            load = moe_mgr.last_expert_load.tolist()
+            print0(f"  expert_load: {[round(x) for x in load]}")
 
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
