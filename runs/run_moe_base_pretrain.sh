@@ -34,6 +34,7 @@ case "$MODE" in
     exit 1
     ;;
 esac
+shift  # 剩余位置参数透传给 base_train (如 --num-iterations 4)
 
 # ===== 环境配置 =====
 # MoE 产物统一落到 cache_moe/，tokenizer 与语料通过 symlink 共享 cache/ 的 (不重复下载)
@@ -157,4 +158,5 @@ fi
   --tee 3 \
   -m scripts.base_train \
   -- \
-  "${TRAIN_ARGS[@]}"
+  "${TRAIN_ARGS[@]}" \
+  "$@"
