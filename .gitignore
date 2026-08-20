@@ -12,4 +12,5 @@ cache_moe/
 
 # Local setup
 CLAUDE.md
+.claude/settings.local.json
 wandb/
