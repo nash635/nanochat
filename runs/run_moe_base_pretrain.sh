@@ -22,6 +22,10 @@
 
 set -euo pipefail
 
+# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
 # ===== 模式开关 =====
 MODE="${1:-fp8}"
 case "$MODE" in
@@ -38,7 +42,7 @@ shift  # 剩余位置参数透传给 base_train (如 --num-iterations 4)
 
 # ===== 环境配置 =====
 # MoE 产物统一落到 cache_moe/，tokenizer 与语料通过 symlink 共享 cache/ 的 (不重复下载)
-export NANOCHAT_BASE_DIR="/volume/posttrain/users/lqiu/src/nanochat/cache_moe"
+export NANOCHAT_BASE_DIR="$ROOT_DIR/cache_moe"
 export NANOCHAT_DATASET_URL="https://hf-mirror.com"
 export HF_ENDPOINT="https://hf-mirror.com"   # FA3 kernel (varunneal) 也走镜像下载
 export OMP_NUM_THREADS=1
@@ -49,10 +53,9 @@ export NCCL_DEBUG=INFO
 export TORCH_NCCL_TRACE_BUFFER_SIZE=2000
 export TORCH_NCCL_BLOCKING_WAIT=1   # 超时后立刻抛错, 不干等 600s
 
-cd /volume/posttrain/users/lqiu/src/nanochat
 export PATH=/opt/venv/bin:$PATH
 
-CACHE_DIR="/volume/posttrain/users/lqiu/src/nanochat/cache"
+CACHE_DIR="$ROOT_DIR/cache"
 
 # ===== 建立隔离目录 + symlink 共享 tokenizer/语料 =====
 mkdir -p "$NANOCHAT_BASE_DIR"

@@ -22,11 +22,14 @@
 
 set -euo pipefail
 
+# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
 # ===== 环境配置 =====
-export NANOCHAT_BASE_DIR="/volume/posttrain/users/lqiu/src/nanochat/cache"
+export NANOCHAT_BASE_DIR="$ROOT_DIR/cache"
 export NANOCHAT_DATASET_URL="https://hf-mirror.com"
 export OMP_NUM_THREADS=1
-cd /volume/posttrain/users/lqiu/src/nanochat
 export PATH=/opt/venv/bin:$PATH
 
 # ===== 打印配置概览 =====
