@@ -577,10 +577,14 @@ class GPT(nn.Module):
                 aux = self.moe_manager.aggregate_aux_loss()
                 z = self.moe_manager.aggregate_router_z_loss()
                 self.moe_manager.aggregate_expert_load()
-                if self.config.use_aux_loss:
-                    loss = loss + self.config.aux_loss_weight * aux
-                if self.config.use_router_z_loss:
-                    loss = loss + self.config.router_z_loss_weight * z
+                # Only fold aux/z into the scalar (mean) loss. For loss_reduction='none'
+                # the caller wants per-token NLL (val bpb eval, RL logp), and broadcasting
+                # the scalar aux/z across every token would corrupt those estimates.
+                if loss_reduction != 'none':
+                    if self.config.use_aux_loss:
+                        loss = loss + self.config.aux_loss_weight * aux
+                    if self.config.use_router_z_loss:
+                        loss = loss + self.config.router_z_loss_weight * z
                 self.moe_manager.reset()
             return loss
         else:
