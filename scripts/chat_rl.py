@@ -339,5 +339,11 @@ for step in range(num_steps):
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
+# Close the rollout generator before exit. It is an infinite `@torch.no_grad()`-decorated
+# generator suspended at a `yield`, so leaving it for interpreter-shutdown GC would make the
+# no_grad context exit while torch's internals are already torn down (the benign but noisy
+# "AttributeError: 'NoneType' object has no attribute 'is_scripting'" on every rank).
+batch_iterator.close()
+
 wandb_run.finish() # wandb run finish
 compute_cleanup()
