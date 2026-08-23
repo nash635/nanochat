@@ -12,7 +12,7 @@
 #   - WP4 已完成 (cache/chatrl_checkpoints/d24/ 有 checkpoint)
 #
 # 用法:
-#   bash runs/run_wp5_infer_chat.sh
+#   bash runs/nanochat_dense/run_wp5_infer_chat.sh
 #
 # 输出:
 #   - 推理基准结果
@@ -20,8 +20,8 @@
 
 set -euo pipefail
 
-# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 定位 nanochat 根目录（本脚本位于 runs/nanochat_dense/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ===== 环境配置 =====

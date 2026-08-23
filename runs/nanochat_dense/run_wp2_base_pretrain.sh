@@ -14,7 +14,7 @@
 # 预估耗时: H20-3e × 8 约 3~4.5 小时 (标称 8×H100 的 ~1.5h × 2~3x)
 #
 # 用法:
-#   bash runs/run_wp2_base_pretrain.sh
+#   bash runs/nanochat_dense/run_wp2_base_pretrain.sh
 #
 # 输出:
 #   - Checkpoint: cache/base_checkpoints/d24/
@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 定位 nanochat 根目录（本脚本位于 runs/nanochat_dense/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ===== 环境配置 =====

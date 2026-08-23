@@ -15,9 +15,9 @@
 #   - /opt/venv/bin/python 可用
 #
 # 用法:
-#   bash runs/run_moe_chat_rl.sh                        # 完整 RL (默认带 aux loss)
-#   bash runs/run_moe_chat_rl.sh --no-aux-loss          # 关闭 aux loss 对比
-#   bash runs/run_moe_chat_rl.sh --num-epochs 2         # 透传任意 chat_rl 参数
+#   bash runs/nanochat_moe/run_moe_chat_rl.sh                        # 完整 RL (默认带 aux loss)
+#   bash runs/nanochat_moe/run_moe_chat_rl.sh --no-aux-loss          # 关闭 aux loss 对比
+#   bash runs/nanochat_moe/run_moe_chat_rl.sh --num-epochs 2         # 透传任意 chat_rl 参数
 #
 # 输出 (与 dense 完全隔离):
 #   - Checkpoint: cache_moe/chatrl_checkpoints/d24/
@@ -28,8 +28,8 @@
 
 set -euo pipefail
 
-# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 定位 nanochat 根目录（本脚本位于 runs/nanochat_moe/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ===== 环境配置 =====

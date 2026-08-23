@@ -4,11 +4,11 @@
 # It is designed to run on a blank 8XH100 GPU node and takes approximately 1.5 hours to complete.
 
 # 1) Example launch (simplest):
-# bash runs/speedrun.sh
+# bash runs/nanochat_dense/speedrun.sh
 # 2) Example launch in a screen session (because the run takes ~1.5 hours):
-# screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
+# screen -L -Logfile runs/nanochat_dense/speedrun.log -S speedrun bash runs/nanochat_dense/speedrun.sh
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
-# WANDB_RUN=speedrun screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
+# WANDB_RUN=speedrun screen -L -Logfile runs/nanochat_dense/speedrun.log -S speedrun bash runs/nanochat_dense/speedrun.sh
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1

@@ -13,8 +13,8 @@
 #   - /opt/venv/bin/python 可用且已装 rustbpe (脚本会自动检查)
 #
 # 用法:
-#   bash runs/run_moe_base_pretrain.sh            # FP8 版 (默认, tensorwise scaling)
-#   bash runs/run_moe_base_pretrain.sh nofp8      # 无 FP8 (BF16), 用于二分验证 loss 发散是否由 FP8×MoE 引起
+#   bash runs/nanochat_moe/run_moe_base_pretrain.sh            # FP8 版 (默认, tensorwise scaling)
+#   bash runs/nanochat_moe/run_moe_base_pretrain.sh nofp8      # 无 FP8 (BF16), 用于二分验证 loss 发散是否由 FP8×MoE 引起
 #
 # 输出 (与 dense 完全隔离):
 #   - cache_moe/base_checkpoints/d24/   (FP8 与 noFP8 共用同一目录)
@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-# 定位 nanochat 根目录（本脚本位于 runs/ 子目录）
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 定位 nanochat 根目录（本脚本位于 runs/nanochat_moe/ 子目录）
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 # ===== 模式开关 =====

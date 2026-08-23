@@ -368,7 +368,7 @@ if args.num_iterations > 0:
     num_iterations = args.num_iterations
     print0(f"Using user-provided number of iterations: {num_iterations:,}")
 elif args.target_flops > 0:
-    # Calculate the number of iterations from the target flops (used in scaling laws analysis, e.g. runs/scaling_laws.sh)
+    # Calculate the number of iterations from the target flops (used in scaling laws analysis, e.g. runs/nanochat_dense/scaling_laws.sh)
     num_iterations = round(args.target_flops / (num_flops_per_token * total_batch_size))
     print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
 elif args.target_param_data_ratio > 0:
