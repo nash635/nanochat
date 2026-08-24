@@ -4,7 +4,7 @@
 # This script was last updated/tuned on Jan 17, 2026.
 
 # Run as:
-# bash runs/runcpu.sh
+# bash runs/nanochat_dense/runcpu.sh
 
 # NOTE: Training LLMs requires GPU compute and $$$. You will not get far on your Macbook.
 # Think of this run as educational/fun demo, not something you should expect to work well.

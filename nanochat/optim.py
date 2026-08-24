@@ -245,10 +245,14 @@ class MuonAdamW(torch.optim.Optimizer):
     - Padding: if K doesn't divide evenly, we zero-pad to (ceil(K/N) * N) for comm,
       then ignore the padding when copying back.
 
-    Buffer Reuse:
-    - For Muon, we allocate stacked_grads for reduce_scatter input, then reuse the
-      same buffer as the output for all_gather (stacked_params). This saves memory
-      since we don't need both buffers simultaneously.
+    Buffers and async lifetime:
+    - For Muon, reduce_scatter writes into grad_chunk (its input stacked_grads stays
+      referenced via the info dict). The all_gather uses a dedicated output buffer and
+      its input (updated_params) is retained in gather_list until the future is waited.
+      Async collectives run on NCCL's stream while the caching allocator tracks liveness
+      on the compute stream, so any buffer handed to an async collective must be kept
+      referenced until completion — otherwise its memory can be recycled and overwritten
+      mid-collective, silently corrupting the result.
 
     Arguments:
         param_groups: List of dicts, each containing:
@@ -411,10 +415,17 @@ class MuonAdamW(torch.optim.Optimizer):
         if num_owned < chunk_size:
             updated_params[num_owned:].zero_()
 
-        # Reuse stacked_grads buffer for all_gather output
-        stacked_params = info["stacked_grads"]
+        # Dedicated output buffer for all_gather (do NOT reuse info["stacked_grads"]).
+        stacked_params = torch.empty_like(info["stacked_grads"])
         future = dist.all_gather_into_tensor(stacked_params, updated_params, async_op=True).get_future()
-        gather_list.append(dict(future=future, stacked_params=stacked_params, params=params))
+        # Retain updated_params (the collective's INPUT) alongside the output until the
+        # future completes. The all_gather runs on NCCL's stream, but the caching allocator
+        # tracks liveness on the compute stream; if we dropped updated_params here, its
+        # memory could be handed to the next torch.empty()/stack() and overwritten while
+        # NCCL is still reading it, corrupting the gathered result. Keeping the reference in
+        # gather_list (alive until _finish_gathers waits the future) prevents that reuse.
+        gather_list.append(dict(future=future, stacked_params=stacked_params,
+                                params=params, gather_input=updated_params))
 
     def _finish_gathers(self, gather_list: list) -> None:
         """Wait for all gathers and copy Muon params back."""

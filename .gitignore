@@ -5,10 +5,12 @@ dev-ignore/
 report.md
 eval_bundle/
 cache/
+cache_moe/
 
 # Secrets
 .env
 
 # Local setup
 CLAUDE.md
+.claude/settings.local.json
 wandb/

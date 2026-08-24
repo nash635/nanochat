@@ -53,6 +53,9 @@ parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learnin
 parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon)")
 parser.add_argument("--weight-decay", type=float, default=0.0, help="weight decay for embedding/unembedding parameters (Adam)")
 parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR as fraction of base LR")
+# MoE (no-op for dense models; inherited from checkpoint by default)
+parser.add_argument("--no-aux-loss", action="store_true", help="disable MoE aux loss during RL (default: follow checkpoint config)")
+parser.add_argument("--no-router-z-loss", action="store_true", help="disable MoE router z loss during RL (default: follow checkpoint config)")
 # Evaluation / checkpointing
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
@@ -73,6 +76,12 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-rl
 # Init model and tokenizer
 model, tokenizer, meta = load_model("sft", device, phase="eval", model_tag=args.model_tag, step=args.model_step)
 engine = Engine(model, tokenizer) # for sampling rollouts
+
+# MoE aux/z loss switches: follow the checkpoint config unless explicitly disabled.
+# The aux/z loss is added to the RL loss as an independent router regularizer (NOT
+# folded into the per-token logp, which must stay a clean NLL for the PG objective).
+use_aux_loss = model.config.use_aux_loss and not args.no_aux_loss
+use_router_z_loss = model.config.use_router_z_loss and not args.no_router_z_loss
 
 # -----------------------------------------------------------------------------
 # Rollout / sampling generator loop that yields batches of examples for training
@@ -270,6 +279,13 @@ for step in range(num_steps):
             # Note, there is no need to add PPO ratio+clip because we are on policy
             # Finally, formulate the loss that we want to minimize (instead of objective we wish to maximize)
             loss = -pg_obj
+            # Add MoE aux/z loss as an independent router regularizer. They are NOT part of
+            # `logp` above (that must stay a clean per-token NLL), so add them here directly.
+            if model.moe_manager is not None:
+                if use_aux_loss:
+                    loss = loss + model.config.aux_loss_weight * model.moe_manager.last_aux_loss
+                if use_router_z_loss:
+                    loss = loss + model.config.router_z_loss_weight * model.moe_manager.last_router_z_loss
             loss.backward()
             print0(f"Step {step}/{num_steps} | Example step {example_step} | Pass {pass_idx} | loss: {loss.item():.6f} | Average reward: {rewards.mean().item()}")
         # For logging
@@ -322,6 +338,12 @@ for step in range(num_steps):
             }
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")
+
+# Close the rollout generator before exit. It is an infinite `@torch.no_grad()`-decorated
+# generator suspended at a `yield`, so leaving it for interpreter-shutdown GC would make the
+# no_grad context exit while torch's internals are already torn down (the benign but noisy
+# "AttributeError: 'NoneType' object has no attribute 'is_scripting'" on every rank).
+batch_iterator.close()
 
 wandb_run.finish() # wandb run finish
 compute_cleanup()

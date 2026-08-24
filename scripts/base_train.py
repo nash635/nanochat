@@ -52,6 +52,21 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+# MoE architecture
+parser.add_argument("--n-exp", type=int, default=1, help="number of experts (1 = dense, no MoE)")
+parser.add_argument("--top-k", type=int, default=2, help="number of experts activated per token")
+parser.add_argument("--stride", type=int, default=2, help="insert a MoE layer every `stride` layers")
+parser.add_argument("--use-aux-loss", action="store_true", help="enable Switch Transformer auxiliary load-balancing loss")
+parser.add_argument("--aux-loss-weight", type=float, default=0.01, help="weight for the auxiliary load-balancing loss")
+parser.add_argument("--use-router-z-loss", action="store_true", help="enable ST-MoE router z loss")
+parser.add_argument("--router-z-loss-weight", type=float, default=0.001, help="weight for the router z loss")
+parser.add_argument("--use-noisy-top-k", action="store_true", help="add learned noise to router logits")
+parser.add_argument("--train-capacity", type=float, default=1.25, help="expert capacity factor during training")
+parser.add_argument("--eval-capacity", type=float, default=2.0, help="expert capacity factor during evaluation")
+parser.add_argument("--min-capacity", type=int, default=4, help="minimum expert capacity")
+parser.add_argument("--use-switch-tfm-init", action="store_true", help="use Switch Transformer init for experts")
+parser.add_argument("--router-use-full-prec", action="store_true", help="compute router logits in fp32")
+parser.add_argument("--grad-clip", type=float, default=1.0, help="global gradient norm clipping (0 = disabled); ZeRO-2 aware, all-reduces the global norm across ranks before clipping")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -137,6 +152,13 @@ def build_model_meta(depth):
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
         window_pattern=args.window_pattern,
+        n_exp=args.n_exp, top_k=args.top_k, stride=args.stride,
+        use_aux_loss=args.use_aux_loss, aux_loss_weight=args.aux_loss_weight,
+        use_router_z_loss=args.use_router_z_loss, router_z_loss_weight=args.router_z_loss_weight,
+        use_noisy_top_k=args.use_noisy_top_k,
+        train_capacity=args.train_capacity, eval_capacity=args.eval_capacity,
+        min_capacity=args.min_capacity, use_switch_tfm_init=args.use_switch_tfm_init,
+        router_use_full_prec=args.router_use_full_prec,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -177,6 +199,10 @@ if args.fp8:
         # Filter: dims must be divisible by 16 (FP8 hardware requirement) large enough
         def fp8_module_filter(mod: nn.Module, fqn: str) -> bool:
             if not isinstance(mod, nn.Linear):
+                return False
+            # Skip MoE router projections (router runs in fp32) and expert params
+            # (experts use bmm over 3D nn.Parameter, not Linear — defensive here).
+            if "router" in fqn or "experts" in fqn:
                 return False
             if mod.in_features % 16 != 0 or mod.out_features % 16 != 0:
                 return False
@@ -342,7 +368,7 @@ if args.num_iterations > 0:
     num_iterations = args.num_iterations
     print0(f"Using user-provided number of iterations: {num_iterations:,}")
 elif args.target_flops > 0:
-    # Calculate the number of iterations from the target flops (used in scaling laws analysis, e.g. runs/scaling_laws.sh)
+    # Calculate the number of iterations from the target flops (used in scaling laws analysis, e.g. runs/nanochat_dense/scaling_laws.sh)
     num_iterations = round(args.target_flops / (num_flops_per_token * total_batch_size))
     print0(f"Calculated number of iterations from target FLOPs: {num_iterations:,}")
 elif args.target_param_data_ratio > 0:
@@ -384,6 +410,32 @@ def get_muon_momentum(it):
 # Weight decay scheduler for Muon optimizer (cosine decay to zero over the course of training)
 def get_weight_decay(it):
     return weight_decay_scaled * 0.5 * (1 + math.cos(math.pi * it / num_iterations))
+
+def clip_grad_norm_(optimizer, max_norm, device):
+    """ZeRO-2 aware global gradient-norm clipping. Returns the global grad norm.
+
+    nanochat does not use DDP: before optimizer.step() each rank still holds the full,
+    un-synchronized gradient (the optimizer all-reduces / reduce-scatters it internally).
+    To clip the *global* norm we therefore sum each rank's squared local norm across
+    ranks first, then scale every rank's grads by the same coefficient so the resulting
+    update stays identical across ranks. When max_norm <= 0 the norm is only measured.
+    """
+    total_norm_sq = torch.zeros((), device=device, dtype=torch.float32)
+    for group in optimizer.param_groups:
+        for p in group['params']:
+            if p.grad is not None:
+                total_norm_sq += p.grad.detach().float().square().sum()
+    if is_ddp_initialized():
+        dist.all_reduce(total_norm_sq, op=dist.ReduceOp.SUM)
+    total_norm = total_norm_sq.sqrt()
+    if max_norm > 0.0:
+        clip_coef = max_norm / (total_norm + 1e-6)
+        if clip_coef < 1.0:
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p.grad is not None:
+                        p.grad.detach().mul_(clip_coef)
+    return total_norm.item()
 
 # -----------------------------------------------------------------------------
 # Training loop
@@ -527,6 +579,8 @@ while True:
             group["weight_decay"] = muon_weight_decay
     if scaler is not None:
         scaler.unscale_(optimizer)
+        # clip the (unscaled) gradients and record the global norm for diagnostics
+        grad_norm = clip_grad_norm_(optimizer, args.grad_clip, device)
         # In distributed training, all ranks must agree on whether to skip the step.
         # Each rank may independently encounter inf/nan gradients, so we all-reduce
         # the found_inf flag (MAX = if any rank found inf, all ranks skip).
@@ -536,6 +590,7 @@ while True:
         scaler.step(optimizer)
         scaler.update()
     else:
+        grad_norm = clip_grad_norm_(optimizer, args.grad_clip, device)
         optimizer.step()
     model.zero_grad(set_to_none=True)
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
@@ -564,7 +619,16 @@ while True:
     else:
         eta_str = ""
     epoch = f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
-    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{eta_str}")
+    # MoE diagnostics: global grad norm + router aux/z loss (expert load logged every 100 steps)
+    moe_mgr = orig_model.moe_manager if (args.n_exp > 1 and orig_model.moe_manager is not None) else None
+    if moe_mgr is not None:
+        aux_s = f"{moe_mgr.last_aux_loss.item():.4f}" if moe_mgr.last_aux_loss is not None else "-"
+        z_s = f"{moe_mgr.last_router_z_loss.item():.4f}" if moe_mgr.last_router_z_loss is not None else "-"
+        grad_s = f"{grad_norm:.3f}" if grad_norm is not None else "-"
+        moe_str = f" | gnorm: {grad_s} | aux: {aux_s} | z: {z_s}"
+    else:
+        moe_str = ""
+    print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | bf16_mfu: {mfu:.2f} | epoch: {epoch} | total time: {total_training_time/60:.2f}m{moe_str}{eta_str}")
     if step % 100 == 0:
         log_data = {
             "step": step,
@@ -577,7 +641,26 @@ while True:
             "train/mfu": mfu,
             "train/epoch": epoch,
         }
+        if moe_mgr is not None:
+            if grad_norm is not None:
+                log_data["train/grad_norm"] = grad_norm
+            if moe_mgr.last_aux_loss is not None:
+                log_data["train/moe_aux_loss"] = moe_mgr.last_aux_loss.item()
+            if moe_mgr.last_router_z_loss is not None:
+                log_data["train/moe_z_loss"] = moe_mgr.last_router_z_loss.item()
+            if moe_mgr.last_expert_load is not None:
+                load = moe_mgr.last_expert_load
+                # per-expert load (routed tokens) + imbalance ratio for collapse detection
+                log_data["train/moe_expert_load_min"] = load.min().item()
+                log_data["train/moe_expert_load_max"] = load.max().item()
+                log_data["train/moe_expert_load_std"] = load.std().item()
+                for e in range(load.numel()):
+                    log_data[f"train/moe_expert_load_{e}"] = load[e].item()
         wandb_run.log(log_data)
+        # print per-expert routed-token load every 100 steps (collapse/overload detection)
+        if moe_mgr is not None and moe_mgr.last_expert_load is not None:
+            load = moe_mgr.last_expert_load.tolist()
+            print0(f"  expert_load: {[round(x) for x in load]}")
 
     # state update
     first_step_of_run = (step == 0) or (resuming and step == args.resume_from_step)
